@@ -1,4 +1,4 @@
-# xPIDS: Explainable Provenance-Based Intrusion Detection System
+# Explainable AI based Intrusion Detection System
 
 **Enterprise-Grade Explainable AI Solution for Cybersecurity** - A production-ready machine learning system that not only detects security threats using advanced graph neural networks but also provides human-interpretable explanations for every decision. This addresses the critical business need for AI transparency in high-stakes security environments where "black box" models are unacceptable.
 
