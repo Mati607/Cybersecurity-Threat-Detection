@@ -55,8 +55,6 @@ This project represents a breakthrough in cybersecurity AI, combining state-of-t
 
 ## 💼 Business Value & Impact
 
-### 🎯 Why This Matters to Recruiters & Employers
-
 In today's AI-driven cybersecurity landscape, organizations face a critical challenge: **AI models that work but can't explain their decisions**. This creates:
 
 - **🏛️ Regulatory Compliance Issues** (GDPR, CCPA require AI explainability)
@@ -142,8 +140,6 @@ Each notebook exposes parameters to configure:
 - **🧠 GNN architecture** choices (GCN, SAGE, GAT)
 - **🔍 Explanation method** selection (attribution vs post-hoc)
 - **📊 Evaluation metrics** and output paths
-
-> **💡 Beryl Integration**: For Beryl users, datasets are available under `Beryl:/shared1/xpids_files`
 
 ## 📊 Datasets
 
