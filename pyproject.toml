@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "threatpipe"
+version = "0.1.0"
+description = "Real-time threat detection pipeline complementing the explainable IDS research code."
+readme = "threatpipe/README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Explainable Intrusion Detection Project" }]
+keywords = ["security", "ids", "anomaly-detection", "siem", "xai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = []
+
+[project.optional-dependencies]
+ml = ["numpy>=1.22"]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+threatpipe = "threatpipe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["threatpipe*"]
+exclude = ["tests*", "system*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = ["ignore::DeprecationWarning"]

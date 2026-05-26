@@ -54,7 +54,7 @@ class EnsembleDetector(BaseDetector):
             return None
 
         score = self._aggregate(hits)
-        if score < self.score_threshold:
+        if score <= 0.0 or score < self.score_threshold:
             return None
 
         reasons = [f"[{h.detector}] {r}" for h in hits for r in h.reasons]
@@ -88,7 +88,7 @@ class EnsembleDetector(BaseDetector):
         if self.strategy == "max":
             return max(h.score for h in hits)
         if self.strategy == "majority":
-            required = max(1, len(self.detectors) // 2)
+            required = max(1, len(self.detectors) // 2 + 1)
             if len(hits) < required:
                 return 0.0
             return sum(h.score for h in hits) / len(hits)

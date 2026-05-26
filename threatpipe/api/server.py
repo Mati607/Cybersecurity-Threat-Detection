@@ -139,12 +139,12 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
 
             url = urlparse(self.path)
             params = {k: v[0] for k, v in parse_qs(url.query).items()}
-            body = self._read_body()
 
             handler = _ROUTES.get((method, url.path))
             if handler is None:
                 return self._write(*_json(404, {"error": f"no route for {method} {url.path}"}))
             try:
+                body = self._read_body()
                 status, headers, payload = handler(self, {"params": params, "body": body})
             except _BadRequest as exc:
                 status, headers, payload = _json(400, {"error": str(exc)})

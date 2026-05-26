@@ -107,7 +107,10 @@ class JSONParser(BaseParser):
 def _resolve_alias(data: Dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in data:
-            return data[key]
+            value = data[key]
+            # skip nested objects/arrays — a dotted alias usually exists
+            if not isinstance(value, (dict, list)):
+                return value
         if "." in key:
             cur: Any = data
             ok = True
@@ -117,7 +120,7 @@ def _resolve_alias(data: Dict[str, Any], keys: tuple[str, ...]) -> Any:
                 else:
                     ok = False
                     break
-            if ok:
+            if ok and not isinstance(cur, (dict, list)):
                 return cur
     return None
 
@@ -130,7 +133,8 @@ def _event_from_aliased(
 ) -> Event:
     kwargs: Dict[str, Any] = {"raw": data, "source": source}
     for field_name, keys in aliases.items():
-        value = _resolve_alias(data, keys)
+        # always try the canonical field name first, then aliases
+        value = _resolve_alias(data, (field_name,) + tuple(keys))
         if value is not None:
             kwargs[field_name] = value
 
@@ -150,6 +154,13 @@ def _event_from_aliased(
 
 
 def _classify(data: Dict[str, Any], kw: Dict[str, Any]) -> EventType:
+    # explicit "event_type" field wins
+    explicit = data.get("event_type")
+    if isinstance(explicit, str):
+        try:
+            return EventType(explicit.lower())
+        except ValueError:
+            pass
     cat = (data.get("event") or {}).get("category") if isinstance(data.get("event"), dict) else None
     hint = (cat or data.get("category") or data.get("type") or "").lower() if isinstance(cat or data.get("category") or data.get("type") or "", str) else ""
 
