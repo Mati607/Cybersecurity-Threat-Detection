@@ -89,11 +89,22 @@ class DetectionPipeline:
         queue: Optional[EventQueue] = None,
         ensemble: Optional[EnsembleDetector] = None,
         alert_sink: Optional[AlertSink] = None,
+        graph: Optional["ProvenanceGraphLike"] = None,
+        correlator: Optional["GraphCorrelatorLike"] = None,
+        incident_aggregator: Optional["IncidentAggregatorLike"] = None,
     ) -> None:
         self.config = config
         self.queue = queue or EventQueue()
         self.ensemble = ensemble or _build_default_ensemble(config)
         self.alert_sink = alert_sink
+        self.graph = graph
+        self._graph_builder = None
+        if graph is not None:
+            # local import to avoid circular dependency at module load time
+            from ..graph.builder import GraphBuilder
+            self._graph_builder = GraphBuilder(graph)
+        self.correlator = correlator
+        self.incident_aggregator = incident_aggregator
         self.metrics = PipelineMetrics()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -133,10 +144,24 @@ class DetectionPipeline:
     def _handle(self, event: Event) -> None:
         self.metrics.events_in += 1
         self.metrics.last_event_ts = event.timestamp
+        touched = self._graph_builder.absorb(event) if self._graph_builder is not None else []
         detection = self.ensemble.detect(event)
         if detection is None:
             return
         self.metrics.record(detection)
+        if self.graph is not None and touched:
+            self.graph.attribute_detection(touched, detection.score)
+        if self.correlator is not None:
+            try:
+                group = self.correlator.correlate(detection, touched)
+            except Exception:                            # pragma: no cover
+                _log.exception("correlator raised")
+                group = None
+            if group is not None and self.incident_aggregator is not None:
+                try:
+                    self.incident_aggregator.ingest(group, detection)
+                except Exception:                        # pragma: no cover
+                    _log.exception("incident aggregator raised")
         with self._lock:
             self._recent.append(detection)
             if len(self._recent) > self._recent_limit:
@@ -153,10 +178,24 @@ class DetectionPipeline:
         for event in events:
             self.metrics.events_in += 1
             self.metrics.last_event_ts = event.timestamp
+            touched = self._graph_builder.absorb(event) if self._graph_builder is not None else []
             detection = self.ensemble.detect(event)
             if detection is None:
                 continue
             self.metrics.record(detection)
+            if self.graph is not None and touched:
+                self.graph.attribute_detection(touched, detection.score)
+            if self.correlator is not None:
+                try:
+                    group = self.correlator.correlate(detection, touched)
+                except Exception:                        # pragma: no cover
+                    _log.exception("correlator raised")
+                    group = None
+                if group is not None and self.incident_aggregator is not None:
+                    try:
+                        self.incident_aggregator.ingest(group, detection)
+                    except Exception:                    # pragma: no cover
+                        _log.exception("incident aggregator raised")
             out.append(detection)
             if self.alert_sink is not None:
                 try:

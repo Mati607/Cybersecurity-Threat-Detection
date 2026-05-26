@@ -84,6 +84,26 @@ def _make_parser() -> argparse.ArgumentParser:
     tr.add_argument("input", help="JSONL file with benign-baseline events")
     tr.add_argument("--out-dir", default="./threatpipe-models", help="where to write the models")
     tr.add_argument("--epochs", type=int, default=None)
+
+    # intel ------------------------------------------------------
+    it = sub.add_parser("intel", help="threat intel feed operations")
+    it_sub = it.add_subparsers(dest="intel_cmd", required=True)
+    it_load = it_sub.add_parser("load", help="load a feed file and dump store stats")
+    it_load.add_argument("feed", help="path to a CSV / JSON / JSONL / hosts feed")
+    it_load.add_argument("--format", help="force a feed format (csv/json/jsonl/stix-lite/hosts)")
+    it_lookup = it_sub.add_parser("lookup", help="look up an indicator")
+    it_lookup.add_argument("feed", help="feed file to load first")
+    it_lookup.add_argument("value", help="indicator value to query")
+    it_lookup.add_argument("--type", help="explicit type (ip/domain/hash_*/...)")
+
+    # incidents --------------------------------------------------
+    inc = sub.add_parser("incidents", help="incident store operations")
+    inc_sub = inc.add_subparsers(dest="inc_cmd", required=True)
+    inc_replay = inc_sub.add_parser("replay", help="replay a JSONL file and dump incidents")
+    inc_replay.add_argument("input", help="JSONL event file")
+    inc_replay.add_argument("--feed", help="optional IOC feed to pre-load")
+    inc_replay.add_argument("--limit", type=int, default=0)
+    inc_replay.add_argument("--out", help="write the resulting incidents JSON to a file")
     return p
 
 
@@ -267,12 +287,86 @@ def _cmd_train(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------
 
+def _cmd_intel(args: argparse.Namespace) -> int:
+    from ..intel import IOCStore, IOCType, load_feed, parse_ioc_type
+    store = IOCStore()
+    loaded = store.add_all(load_feed(args.feed, format=args.format if hasattr(args, "format") else None))
+    print(f"loaded {loaded} indicators from {args.feed}")
+    if args.intel_cmd == "load":
+        for type_name, count in store.stats()["by_type"].items():
+            print(f"  {type_name:<12} {count}")
+        return 0
+    # lookup
+    ioc_type = None
+    if args.type:
+        try:
+            ioc_type = IOCType(args.type)
+        except ValueError:
+            print(f"unknown type: {args.type}", file=sys.stderr)
+            return 2
+    else:
+        ioc_type = parse_ioc_type(args.value)
+    if ioc_type is None:
+        print("could not infer IOC type", file=sys.stderr)
+        return 1
+    match = store.lookup(ioc_type, args.value)
+    if match is None:
+        print(f"no match for {ioc_type.value}={args.value}")
+        return 1
+    print(json.dumps(match.to_dict(), indent=2))
+    return 0
+
+
+def _cmd_incidents(args: argparse.Namespace) -> int:
+    cfg = _resolve_config(args)
+    configure_logging(level=cfg.log_level)
+    from ..graph import GraphCorrelator, ProvenanceGraph
+    from ..incidents import IncidentAggregator, IncidentStore
+    from ..intel import IOCMatcher, IOCStore, load_feed
+
+    pipeline = DetectionPipeline(cfg)
+    graph = ProvenanceGraph()
+    pipeline.graph = graph
+    from ..graph.builder import GraphBuilder
+    pipeline._graph_builder = GraphBuilder(graph)
+    pipeline.correlator = GraphCorrelator(graph)
+    inc_store = IncidentStore()
+    pipeline.incident_aggregator = IncidentAggregator(inc_store)
+    if args.feed:
+        ioc_store = IOCStore()
+        ioc_store.add_all(load_feed(args.feed))
+        pipeline.ensemble.detectors.append(IOCMatcher(ioc_store, min_score=0.1))
+
+    events = list(_read_jsonl(args.input))
+    if args.limit:
+        events = events[: args.limit]
+    pipeline.run_once(events)
+
+    incidents = inc_store.list(limit=1000)
+    if args.out:
+        Path(args.out).write_text(json.dumps([i.to_dict() for i in incidents], indent=2, default=str))
+        print(f"wrote {len(incidents)} incidents to {args.out}")
+    else:
+        for inc in incidents:
+            phases = ", ".join(sorted(p.value for p in inc.covered_phases)) or "-"
+            print(
+                f"{inc.incident_id} {inc.severity.value:<8} score={inc.score:.2f} "
+                f"dets={inc.detection_count} hosts={','.join(inc.affected_hosts) or '-'} "
+                f"phases=[{phases}]"
+            )
+            print(f"    {inc.title}")
+    print(f"\n{len(incidents)} incidents derived from {len(events)} events", file=sys.stderr)
+    return 0
+
+
 _DISPATCH = {
     "run": _cmd_run,
     "replay": _cmd_replay,
     "rules": _cmd_rules,
     "parse": _cmd_parse,
     "train": _cmd_train,
+    "intel": _cmd_intel,
+    "incidents": _cmd_incidents,
 }
 
 

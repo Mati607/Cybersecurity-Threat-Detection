@@ -237,6 +237,138 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
                 "detection": detection.to_dict() if detection else None,
             })
 
+        # graph endpoints ---------------------------------------
+        def h_graph_stats(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            if pipeline.graph is None:
+                return _json(200, {"enabled": False})
+            return _json(200, {"enabled": True, **pipeline.graph.stats()})
+
+        def h_graph_top(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            if pipeline.graph is None:
+                raise _BadRequest("graph layer disabled")
+            from ..graph.query import GraphQuery
+            limit = int(ctx["params"].get("limit", 20))
+            by = ctx["params"].get("by", "detection_score")
+            items = GraphQuery(pipeline.graph).top_nodes(limit=limit, by=by)
+            return _json(200, {"count": len(items), "items": items, "by": by})
+
+        def h_graph_subgraph(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            if pipeline.graph is None:
+                raise _BadRequest("graph layer disabled")
+            from ..graph.query import GraphQuery
+            body = ctx["body"]
+            if not isinstance(body, dict) or "seeds" not in body:
+                raise _BadRequest("body must contain seeds")
+            seeds = [tuple(s) for s in body["seeds"] if isinstance(s, (list, tuple)) and len(s) == 2]
+            depth = int(body.get("depth", 2))
+            payload = GraphQuery(pipeline.graph).subgraph(seeds, depth=depth)
+            return _json(200, payload)
+
+        def h_graph_export(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            if pipeline.graph is None:
+                raise _BadRequest("graph layer disabled")
+            from ..graph.export import to_cyto_json, to_dot
+            fmt = ctx["params"].get("format", "cyto")
+            if fmt == "dot":
+                return 200, {"Content-Type": "text/vnd.graphviz; charset=utf-8"}, to_dot(pipeline.graph).encode("utf-8")
+            return 200, {"Content-Type": "application/json; charset=utf-8"}, to_cyto_json(pipeline.graph).encode("utf-8")
+
+        # intel endpoints ---------------------------------------
+        def h_intel_stats(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _ioc_store_from_pipeline(pipeline)
+            if store is None:
+                return _json(200, {"enabled": False})
+            return _json(200, {"enabled": True, **store.stats()})
+
+        def h_intel_lookup(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _ioc_store_from_pipeline(pipeline)
+            if store is None:
+                raise _BadRequest("intel layer disabled")
+            from ..intel.ioc import IOCType, parse_ioc_type
+            value = ctx["params"].get("value") or ""
+            type_raw = ctx["params"].get("type")
+            if not value:
+                raise _BadRequest("missing 'value' param")
+            ioc_type = None
+            if type_raw:
+                try:
+                    ioc_type = IOCType(type_raw)
+                except ValueError:
+                    raise _BadRequest(f"unknown type: {type_raw}")
+            else:
+                ioc_type = parse_ioc_type(value)
+            if ioc_type is None:
+                return _json(200, {"match": None, "reason": "could not infer IOC type"})
+            ioc = store.lookup(ioc_type, value)
+            return _json(200, {"match": ioc.to_dict() if ioc else None})
+
+        # incidents endpoints -----------------------------------
+        def h_incident_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            inc_store = _incident_store(pipeline)
+            if inc_store is None:
+                return _json(200, {"count": 0, "items": [], "enabled": False})
+            from ..incidents.model import IncidentStatus
+            status_raw = ctx["params"].get("status")
+            status = None
+            if status_raw:
+                try:
+                    status = IncidentStatus(status_raw)
+                except ValueError:
+                    raise _BadRequest(f"unknown status: {status_raw}")
+            items = inc_store.list(
+                status=status,
+                min_severity=ctx["params"].get("min_severity"),
+                host=ctx["params"].get("host"),
+                limit=int(ctx["params"].get("limit", 100)),
+            )
+            return _json(200, {"count": len(items), "items": [i.to_dict() for i in items]})
+
+        def h_incident_get(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            inc_store = _incident_store(pipeline)
+            inc_id = ctx["params"].get("id")
+            if inc_store is None or not inc_id:
+                raise _BadRequest("incident id required")
+            incident = inc_store.get(inc_id)
+            if incident is None:
+                return _json(404, {"error": "incident not found"})
+            return _json(200, incident.to_dict())
+
+        def h_incident_timeline(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            inc_store = _incident_store(pipeline)
+            inc_id = ctx["params"].get("id")
+            if inc_store is None or not inc_id:
+                raise _BadRequest("incident id required")
+            incident = inc_store.get(inc_id)
+            if incident is None:
+                return _json(404, {"error": "incident not found"})
+            recent = {d.event.event_id: d for d in pipeline.recent(limit=10_000)}
+            from ..incidents.timeline import build_timeline
+            detections = [recent[did] for did in incident.detection_ids if did in recent]
+            entries = build_timeline(detections)
+            return _json(200, {
+                "incident_id": inc_id,
+                "count": len(entries),
+                "entries": [e.to_dict() for e in entries],
+            })
+
+        def h_incident_status(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            inc_store = _incident_store(pipeline)
+            body = ctx["body"] or {}
+            inc_id = body.get("id") or ctx["params"].get("id")
+            status_raw = body.get("status")
+            note = body.get("note")
+            if inc_store is None or not inc_id or not status_raw:
+                raise _BadRequest("id and status are required")
+            from ..incidents.model import IncidentStatus
+            try:
+                status = IncidentStatus(status_raw)
+            except ValueError:
+                raise _BadRequest(f"unknown status: {status_raw}")
+            incident = inc_store.update_status(inc_id, status, note=note)
+            if incident is None:
+                return _json(404, {"error": "incident not found"})
+            return _json(200, incident.to_dict())
+
     # route table -------------------------------------------------
     _ROUTES: Dict[Tuple[str, str], Route] = {
         ("GET", "/health"): _Handler.h_health,
@@ -246,8 +378,33 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
         ("GET", "/rules"): _Handler.h_rules,
         ("POST", "/events"): _Handler.h_events,
         ("POST", "/detect"): _Handler.h_detect,
+        ("GET", "/graph/stats"): _Handler.h_graph_stats,
+        ("GET", "/graph/top"): _Handler.h_graph_top,
+        ("POST", "/graph/subgraph"): _Handler.h_graph_subgraph,
+        ("GET", "/graph/export"): _Handler.h_graph_export,
+        ("GET", "/intel/stats"): _Handler.h_intel_stats,
+        ("GET", "/intel/lookup"): _Handler.h_intel_lookup,
+        ("GET", "/incidents"): _Handler.h_incident_list,
+        ("GET", "/incidents/get"): _Handler.h_incident_get,
+        ("GET", "/incidents/timeline"): _Handler.h_incident_timeline,
+        ("POST", "/incidents/status"): _Handler.h_incident_status,
     }
     return _Handler
+
+
+def _ioc_store_from_pipeline(pipeline):
+    from ..intel.matcher import IOCMatcher
+    for det in pipeline.ensemble.detectors:
+        if isinstance(det, IOCMatcher):
+            return det.store
+    return None
+
+
+def _incident_store(pipeline):
+    agg = getattr(pipeline, "incident_aggregator", None)
+    if agg is None:
+        return None
+    return getattr(agg, "store", None)
 
 
 class _BadRequest(Exception):

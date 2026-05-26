@@ -70,8 +70,16 @@ class EnsembleDetector(BaseDetector):
             metadata={
                 "strategy": self.strategy,
                 "components": [
-                    {"detector": h.detector, "score": h.score, "severity": h.severity.value}
+                    {
+                        "detector": h.detector,
+                        "score": h.score,
+                        "severity": h.severity.value,
+                        "metadata": dict(h.metadata),
+                    }
                     for h in hits
+                ],
+                "matches": [
+                    m for h in hits for m in (h.metadata.get("matches") or [])
                 ],
             },
         )
