@@ -58,7 +58,7 @@ class ProvenanceGraph:
             if timestamp:
                 node.touch(timestamp)
             if len(self._nodes) > self.max_nodes:
-                self._evict_oldest(int(self.max_nodes * 0.05))
+                self._evict_oldest(max(1, int(self.max_nodes * 0.05)))
             return node
 
     def upsert_edge(
