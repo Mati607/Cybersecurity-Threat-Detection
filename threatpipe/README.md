@@ -81,6 +81,16 @@ this way.
 | GET    | `/incidents/get`         | Fetch a single incident (`?id=`)                     |
 | GET    | `/incidents/timeline`    | Build a timeline view for an incident                |
 | POST   | `/incidents/status`      | Acknowledge / contain / resolve / mark FP            |
+| POST   | `/hunt/search`           | Run a one-off hunt query                             |
+| GET    | `/hunt`                  | List saved hunts                                     |
+| POST   | `/hunt`                  | Save a hunt                                          |
+| POST   | `/hunt/run`              | Execute a saved hunt now (`?id=`)                    |
+| GET    | `/attck/techniques`      | List ATT&CK techniques (`?q=` to search)             |
+| GET    | `/attck/coverage`        | Detection coverage map                               |
+| GET    | `/attck/navigator`       | ATT&CK Navigator layer JSON                          |
+| GET    | `/response/playbooks`    | Registered response playbooks                        |
+| GET    | `/response/audit`        | Response action audit log                            |
+| GET    | `/` and `/dashboard`     | Single-file HTML SOC console                         |
 
 Pass `X-Api-Key` (or `Authorization: Bearer <key>`) when an api key is
 configured. CORS origins are configurable per deployment.

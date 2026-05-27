@@ -369,6 +369,126 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
                 return _json(404, {"error": "incident not found"})
             return _json(200, incident.to_dict())
 
+        # hunt endpoints ----------------------------------------
+        def h_hunt_search(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..hunt import HuntQuery
+            body = ctx["body"] or {}
+            query = body.get("query") or ctx["params"].get("query")
+            target = (body.get("target") or ctx["params"].get("target") or "detections").lower()
+            limit = int(body.get("limit", ctx["params"].get("limit", 100)))
+            if not query:
+                raise _BadRequest("query is required")
+            records = _hunt_records(pipeline, target)
+            hunt = HuntQuery(query, max_matches=limit)
+            try:
+                hunt.expr
+            except SyntaxError as exc:
+                raise _BadRequest(f"syntax: {exc}")
+            result = hunt.run_over(records)
+            return _json(200, result.to_dict())
+
+        def h_hunt_list(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _hunt_store(pipeline)
+            if store is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            return _json(200, {
+                "enabled": True,
+                "count": len(store),
+                "items": [h.to_dict() for h in store.list()],
+            })
+
+        def h_hunt_save(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..hunt import SavedHunt
+            store = _hunt_store(pipeline)
+            if store is None:
+                raise _BadRequest("hunt store disabled")
+            body = ctx["body"] or {}
+            if not body.get("hunt_id") or not body.get("query"):
+                raise _BadRequest("hunt_id and query are required")
+            try:
+                store.upsert(SavedHunt.from_dict(body))
+            except (KeyError, ValueError) as exc:
+                raise _BadRequest(str(exc))
+            return _json(201, {"saved": body["hunt_id"]})
+
+        def h_hunt_run(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _hunt_store(pipeline)
+            scheduler = getattr(pipeline, "hunt_scheduler", None)
+            hunt_id = ctx["params"].get("id")
+            if store is None or scheduler is None or not hunt_id:
+                raise _BadRequest("hunt store, scheduler, and id are required")
+            hunt = store.get(hunt_id)
+            if hunt is None:
+                return _json(404, {"error": "hunt not found"})
+            result = scheduler.run_now(hunt)
+            return _json(200, result.to_dict())
+
+        # attck endpoints ---------------------------------------
+        def h_attck_techniques(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..attck import AttckCatalog
+            catalog = AttckCatalog()
+            search = ctx["params"].get("q")
+            items = catalog.search(search) if search else catalog.all()
+            return _json(200, {"count": len(items), "items": [t.to_dict() for t in items]})
+
+        def h_attck_coverage(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..attck import AttckCatalog, CoverageMap
+            from ..detection.rule_engine import RuleEngine
+            rules: List = []
+            for det in pipeline.ensemble.detectors:
+                if isinstance(det, RuleEngine):
+                    rules.extend(det.rules)
+            coverage = CoverageMap(AttckCatalog())
+            coverage.add_rules(rules)
+            return _json(200, coverage.to_dict())
+
+        def h_attck_navigator(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..attck import AttckCatalog, CoverageMap, to_navigator_layer
+            from ..detection.rule_engine import RuleEngine
+            rules: List = []
+            for det in pipeline.ensemble.detectors:
+                if isinstance(det, RuleEngine):
+                    rules.extend(det.rules)
+            coverage = CoverageMap(AttckCatalog())
+            coverage.add_rules(rules)
+            return _json(200, to_navigator_layer(coverage))
+
+        # response endpoints ------------------------------------
+        def h_response_audit(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "response_engine", None)
+            if engine is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            limit = int(ctx["params"].get("limit", 100))
+            entries = engine.audit_log.list(
+                limit=limit,
+                action=ctx["params"].get("action"),
+                playbook_id=ctx["params"].get("playbook_id"),
+                incident_id=ctx["params"].get("incident_id"),
+            )
+            return _json(200, {
+                "enabled": True,
+                "stats": engine.audit_log.stats(),
+                "count": len(entries),
+                "items": [e.to_dict() for e in entries],
+            })
+
+        def h_response_playbooks(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "response_engine", None)
+            if engine is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            playbooks = engine.list_playbooks()
+            return _json(200, {
+                "enabled": True,
+                "count": len(playbooks),
+                "items": [pb.to_dict() for pb in playbooks],
+            })
+
+        # dashboard ---------------------------------------------
+        def h_dashboard(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..dashboard import render_dashboard
+            html = render_dashboard()
+            return 200, {"Content-Type": "text/html; charset=utf-8"}, html.encode("utf-8")
+
     # route table -------------------------------------------------
     _ROUTES: Dict[Tuple[str, str], Route] = {
         ("GET", "/health"): _Handler.h_health,
@@ -388,8 +508,37 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
         ("GET", "/incidents/get"): _Handler.h_incident_get,
         ("GET", "/incidents/timeline"): _Handler.h_incident_timeline,
         ("POST", "/incidents/status"): _Handler.h_incident_status,
+        ("POST", "/hunt/search"): _Handler.h_hunt_search,
+        ("GET", "/hunt"): _Handler.h_hunt_list,
+        ("POST", "/hunt"): _Handler.h_hunt_save,
+        ("POST", "/hunt/run"): _Handler.h_hunt_run,
+        ("GET", "/attck/techniques"): _Handler.h_attck_techniques,
+        ("GET", "/attck/coverage"): _Handler.h_attck_coverage,
+        ("GET", "/attck/navigator"): _Handler.h_attck_navigator,
+        ("GET", "/response/audit"): _Handler.h_response_audit,
+        ("GET", "/response/playbooks"): _Handler.h_response_playbooks,
+        ("GET", "/"): _Handler.h_dashboard,
+        ("GET", "/dashboard"): _Handler.h_dashboard,
     }
     return _Handler
+
+
+def _hunt_records(pipeline, target: str):
+    target = target.lower()
+    if target == "detections":
+        return pipeline.recent(limit=10_000)
+    if target == "incidents":
+        store = _incident_store(pipeline)
+        return store.list(limit=10_000) if store else []
+    if target == "events":
+        # Reconstruct events from the recent detections - real deployments
+        # plug an event store in via a future hook.
+        return [d.event for d in pipeline.recent(limit=10_000)]
+    return []
+
+
+def _hunt_store(pipeline):
+    return getattr(pipeline, "hunt_store", None)
 
 
 def _ioc_store_from_pipeline(pipeline):
