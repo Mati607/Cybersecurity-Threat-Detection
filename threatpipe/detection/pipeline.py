@@ -105,6 +105,7 @@ class DetectionPipeline:
             self._graph_builder = GraphBuilder(graph)
         self.correlator = correlator
         self.incident_aggregator = incident_aggregator
+        self.response_engine: Optional[Any] = None
         self.metrics = PipelineMetrics()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -157,11 +158,23 @@ class DetectionPipeline:
             except Exception:                            # pragma: no cover
                 _log.exception("correlator raised")
                 group = None
+            incident = None
+            previous_id = None
             if group is not None and self.incident_aggregator is not None:
                 try:
-                    self.incident_aggregator.ingest(group, detection)
+                    existing = self.incident_aggregator._group_to_incident.get(group.group_id) \
+                        if hasattr(self.incident_aggregator, "_group_to_incident") else None
+                    previous_id = existing
+                    incident = self.incident_aggregator.ingest(group, detection)
                 except Exception:                        # pragma: no cover
                     _log.exception("incident aggregator raised")
+            if self.response_engine is not None:
+                try:
+                    self.response_engine.on_detection(detection)
+                    if incident is not None:
+                        self.response_engine.on_incident(incident, new=previous_id is None)
+                except Exception:                        # pragma: no cover
+                    _log.exception("response engine raised")
         with self._lock:
             self._recent.append(detection)
             if len(self._recent) > self._recent_limit:
@@ -185,6 +198,8 @@ class DetectionPipeline:
             self.metrics.record(detection)
             if self.graph is not None and touched:
                 self.graph.attribute_detection(touched, detection.score)
+            incident = None
+            previous_id = None
             if self.correlator is not None:
                 try:
                     group = self.correlator.correlate(detection, touched)
@@ -193,9 +208,19 @@ class DetectionPipeline:
                     group = None
                 if group is not None and self.incident_aggregator is not None:
                     try:
-                        self.incident_aggregator.ingest(group, detection)
+                        existing = self.incident_aggregator._group_to_incident.get(group.group_id) \
+                            if hasattr(self.incident_aggregator, "_group_to_incident") else None
+                        previous_id = existing
+                        incident = self.incident_aggregator.ingest(group, detection)
                     except Exception:                    # pragma: no cover
                         _log.exception("incident aggregator raised")
+            if self.response_engine is not None:
+                try:
+                    self.response_engine.on_detection(detection)
+                    if incident is not None:
+                        self.response_engine.on_incident(incident, new=previous_id is None)
+                except Exception:                        # pragma: no cover
+                    _log.exception("response engine raised")
             out.append(detection)
             if self.alert_sink is not None:
                 try:
