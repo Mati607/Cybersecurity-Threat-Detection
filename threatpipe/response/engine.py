@@ -48,7 +48,8 @@ class ResponseEngine:
         global_dry_run: bool = False,
     ) -> None:
         self.actions: Dict[str, BaseAction] = dict(actions or DEFAULT_ACTIONS)
-        self.audit_log = audit_log or AuditLog()
+        # AuditLog defines __len__; an empty one is falsy - check identity.
+        self.audit_log = audit_log if audit_log is not None else AuditLog()
         self.graph = graph
         self.global_dry_run = global_dry_run
         self.playbooks: List[Playbook] = []
