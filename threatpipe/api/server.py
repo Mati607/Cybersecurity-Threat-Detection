@@ -483,6 +483,150 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
                 "items": [pb.to_dict() for pb in playbooks],
             })
 
+        # forensics endpoints -----------------------------------
+        def h_forensics_stats(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _forensics_store(pipeline)
+            if store is None:
+                return _json(200, {"enabled": False})
+            return _json(200, {"enabled": True, **store.stats()})
+
+        def h_forensics_search(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _forensics_store(pipeline)
+            if store is None:
+                raise _BadRequest("forensics layer disabled")
+            from ..forensics import ForensicsQuery, TimeRange
+            params = ctx["params"]
+            tr = TimeRange(
+                since=_opt_float(params.get("since")),
+                until=_opt_float(params.get("until")),
+            )
+            items = ForensicsQuery(store).search_detections(
+                range=tr,
+                host=params.get("host"),
+                severity=params.get("severity"),
+                detector=params.get("detector"),
+                limit=int(params.get("limit", 100)),
+            )
+            return _json(200, {"count": len(items), "items": items})
+
+        def h_forensics_histogram(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = _forensics_store(pipeline)
+            if store is None:
+                raise _BadRequest("forensics layer disabled")
+            from ..forensics import ForensicsQuery, TimeRange
+            params = ctx["params"]
+            since = _opt_float(params.get("since"))
+            until = _opt_float(params.get("until"))
+            if since is None or until is None:
+                raise _BadRequest("since and until are required")
+            agg = ForensicsQuery(store).detections_histogram(
+                range=TimeRange(since=since, until=until),
+                bin_seconds=int(params.get("bin_seconds", 60)),
+            )
+            return _json(200, agg.to_dict())
+
+        # simulator endpoints -----------------------------------
+        def h_sim_scenarios(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..simulator import list_scenarios
+            items = [s.to_dict() for s in list_scenarios()]
+            return _json(200, {"count": len(items), "items": items})
+
+        def h_sim_run(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..simulator import (
+                SimulationEngine, get_scenario, evaluate_detection_coverage,
+            )
+            body = ctx["body"] or {}
+            scenario_id = body.get("scenario") or ctx["params"].get("scenario")
+            if not scenario_id:
+                raise _BadRequest("scenario is required")
+            try:
+                scenario = get_scenario(scenario_id)
+            except KeyError:
+                return _json(404, {"error": f"unknown scenario: {scenario_id}"})
+            engine = SimulationEngine(pipeline)
+            result = engine.run(scenario, host=body.get("host", "victim01"),
+                                user=body.get("user", "jdoe"))
+            report = evaluate_detection_coverage(scenario, result)
+            return _json(200, {"result": result.to_dict(), "coverage": report.to_dict()})
+
+        # case endpoints ----------------------------------------
+        def h_cases_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            mgr = getattr(pipeline, "case_manager", None)
+            if mgr is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            from ..cases import CasePriority, CaseStatus
+            params = ctx["params"]
+            status = _enum_or_none(CaseStatus, params.get("status"))
+            priority = _enum_or_none(CasePriority, params.get("priority"))
+            cases = mgr.store.list(
+                status=status, priority=priority,
+                assignee=params.get("assignee"),
+                open_only=params.get("open_only") == "true",
+                limit=int(params.get("limit", 100)),
+            )
+            return _json(200, {"enabled": True, "count": len(cases),
+                                "items": [c.to_dict() for c in cases]})
+
+        def h_cases_get(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            mgr = getattr(pipeline, "case_manager", None)
+            case_id = ctx["params"].get("id")
+            if mgr is None or not case_id:
+                raise _BadRequest("case id required")
+            case = mgr.get(case_id)
+            if case is None:
+                return _json(404, {"error": "case not found"})
+            return _json(200, case.to_dict())
+
+        def h_cases_create(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            mgr = getattr(pipeline, "case_manager", None)
+            if mgr is None:
+                raise _BadRequest("case manager disabled")
+            body = ctx["body"] or {}
+            if not body.get("title"):
+                raise _BadRequest("title is required")
+            from ..cases import CasePriority
+            case = mgr.open_case(
+                title=body["title"],
+                reporter=body.get("reporter", "api"),
+                description=body.get("description", ""),
+                priority=_enum_or_none(CasePriority, body.get("priority")) or CasePriority.P3,
+                incident_ids=body.get("incident_ids", []),
+                tags=body.get("tags", []),
+            )
+            return _json(201, case.to_dict())
+
+        def h_cases_note(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            mgr = getattr(pipeline, "case_manager", None)
+            body = ctx["body"] or {}
+            if mgr is None or not body.get("id") or not body.get("body"):
+                raise _BadRequest("id and body are required")
+            note = mgr.add_note(body["id"], body.get("author", "api"), body["body"])
+            if note is None:
+                return _json(404, {"error": "case not found"})
+            return _json(201, note.to_dict())
+
+        # compliance endpoints ----------------------------------
+        def h_compliance_frameworks(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..compliance import list_frameworks
+            items = [{"framework_id": f.framework_id, "name": f.name,
+                      "version": f.version, "control_count": len(f.controls)}
+                     for f in list_frameworks()]
+            return _json(200, {"count": len(items), "items": items})
+
+        def h_compliance_report(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            from ..compliance import build_compliance_report, get_framework
+            from ..detection.rule_engine import RuleEngine
+            framework_id = ctx["params"].get("framework", "nist-800-53")
+            try:
+                framework = get_framework(framework_id)
+            except KeyError:
+                return _json(404, {"error": f"unknown framework: {framework_id}"})
+            rules: List = []
+            for det in pipeline.ensemble.detectors:
+                if isinstance(det, RuleEngine):
+                    rules.extend(det.rules)
+            return _json(200, build_compliance_report(framework, rules))
+
         # dashboard ---------------------------------------------
         def h_dashboard(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
             from ..dashboard import render_dashboard
@@ -517,10 +661,46 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
         ("GET", "/attck/navigator"): _Handler.h_attck_navigator,
         ("GET", "/response/audit"): _Handler.h_response_audit,
         ("GET", "/response/playbooks"): _Handler.h_response_playbooks,
+        ("GET", "/forensics/stats"): _Handler.h_forensics_stats,
+        ("GET", "/forensics/search"): _Handler.h_forensics_search,
+        ("GET", "/forensics/histogram"): _Handler.h_forensics_histogram,
+        ("GET", "/simulator/scenarios"): _Handler.h_sim_scenarios,
+        ("POST", "/simulator/run"): _Handler.h_sim_run,
+        ("GET", "/cases"): _Handler.h_cases_list,
+        ("GET", "/cases/get"): _Handler.h_cases_get,
+        ("POST", "/cases"): _Handler.h_cases_create,
+        ("POST", "/cases/note"): _Handler.h_cases_note,
+        ("GET", "/compliance/frameworks"): _Handler.h_compliance_frameworks,
+        ("GET", "/compliance/report"): _Handler.h_compliance_report,
         ("GET", "/"): _Handler.h_dashboard,
         ("GET", "/dashboard"): _Handler.h_dashboard,
     }
     return _Handler
+
+
+def _forensics_store(pipeline):
+    sink = getattr(pipeline, "forensics_sink", None)
+    if sink is not None:
+        return sink.store
+    return getattr(pipeline, "forensics_store", None)
+
+
+def _opt_float(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enum_or_none(enum_cls, value):
+    if not value:
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
 
 
 def _hunt_records(pipeline, target: str):

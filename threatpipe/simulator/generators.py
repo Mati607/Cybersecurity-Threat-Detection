@@ -123,9 +123,13 @@ def benign_background(count: int = 100, *, hosts: Optional[List[str]] = None,
     """
     rng = random.Random(seed)
     hosts = hosts or ["web1", "web2", "db1", "workstation7"]
-    procs = ["bash", "python3", "sshd", "nginx", "postgres", "cron", "systemd"]
-    cmds = ["ls -la", "python3 app.py", "grep error log", "psql -c 'select 1'",
-            "tail -f access.log", "git status", "make build"]
+    # Deliberately avoid interactive-shell images (bash/sh/cmd/powershell)
+    # so the baseline doesn't trip the broad "suspicious shell" rule -
+    # benign noise should look like daemons doing daemon things.
+    procs = ["python3", "sshd", "nginx", "postgres", "cron", "systemd", "node"]
+    cmds = ["python3 app.py", "psql -c 'select 1'",
+            "tail -f access.log", "nginx -g daemon off", "node server.js",
+            "postgres -D /var/lib/pgsql"]
     out: List[Event] = []
     for i in range(count):
         out.append(Event(

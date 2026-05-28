@@ -90,6 +90,17 @@ this way.
 | GET    | `/attck/navigator`       | ATT&CK Navigator layer JSON                          |
 | GET    | `/response/playbooks`    | Registered response playbooks                        |
 | GET    | `/response/audit`        | Response action audit log                            |
+| GET    | `/forensics/stats`       | Persistent store counts + severity breakdown         |
+| GET    | `/forensics/search`      | Search stored detections (`?since=&until=&host=...`) |
+| GET    | `/forensics/histogram`   | Time-bucketed detection histogram                    |
+| GET    | `/simulator/scenarios`   | List built-in adversary scenarios                    |
+| POST   | `/simulator/run`         | Run a scenario, return a coverage report             |
+| GET    | `/cases`                 | List investigation cases (`?status=&priority=...`)   |
+| GET    | `/cases/get`             | Fetch a single case (`?id=`)                         |
+| POST   | `/cases`                 | Open a new case                                      |
+| POST   | `/cases/note`            | Append a note to a case                              |
+| GET    | `/compliance/frameworks` | List bundled control frameworks                      |
+| GET    | `/compliance/report`     | Control-coverage + gap report (`?framework=`)        |
 | GET    | `/` and `/dashboard`     | Single-file HTML SOC console                         |
 
 Pass `X-Api-Key` (or `Authorization: Bearer <key>`) when an api key is

@@ -106,6 +106,8 @@ class DetectionPipeline:
         self.correlator = correlator
         self.incident_aggregator = incident_aggregator
         self.response_engine: Optional[Any] = None
+        self.forensics_sink: Optional[Any] = None
+        self.case_manager: Optional[Any] = None
         self.metrics = PipelineMetrics()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -146,10 +148,20 @@ class DetectionPipeline:
         self.metrics.events_in += 1
         self.metrics.last_event_ts = event.timestamp
         touched = self._graph_builder.absorb(event) if self._graph_builder is not None else []
+        if self.forensics_sink is not None:
+            try:
+                self.forensics_sink.on_event(event)
+            except Exception:                            # pragma: no cover
+                _log.exception("forensics event write failed")
         detection = self.ensemble.detect(event)
         if detection is None:
             return
         self.metrics.record(detection)
+        if self.forensics_sink is not None:
+            try:
+                self.forensics_sink.on_detection(detection)
+            except Exception:                            # pragma: no cover
+                _log.exception("forensics detection write failed")
         if self.graph is not None and touched:
             self.graph.attribute_detection(touched, detection.score)
         if self.correlator is not None:
@@ -168,6 +180,11 @@ class DetectionPipeline:
                     incident = self.incident_aggregator.ingest(group, detection)
                 except Exception:                        # pragma: no cover
                     _log.exception("incident aggregator raised")
+            if incident is not None and self.forensics_sink is not None:
+                try:
+                    self.forensics_sink.on_incident(incident)
+                except Exception:                        # pragma: no cover
+                    _log.exception("forensics incident write failed")
             if self.response_engine is not None:
                 try:
                     self.response_engine.on_detection(detection)
@@ -175,6 +192,11 @@ class DetectionPipeline:
                         self.response_engine.on_incident(incident, new=previous_id is None)
                 except Exception:                        # pragma: no cover
                     _log.exception("response engine raised")
+            if incident is not None and self.case_manager is not None and previous_id is None:
+                try:
+                    self.case_manager.open_from_incident(incident)
+                except Exception:                        # pragma: no cover
+                    _log.exception("case manager raised")
         with self._lock:
             self._recent.append(detection)
             if len(self._recent) > self._recent_limit:
@@ -192,10 +214,20 @@ class DetectionPipeline:
             self.metrics.events_in += 1
             self.metrics.last_event_ts = event.timestamp
             touched = self._graph_builder.absorb(event) if self._graph_builder is not None else []
+            if self.forensics_sink is not None:
+                try:
+                    self.forensics_sink.on_event(event)
+                except Exception:                        # pragma: no cover
+                    _log.exception("forensics event write failed")
             detection = self.ensemble.detect(event)
             if detection is None:
                 continue
             self.metrics.record(detection)
+            if self.forensics_sink is not None:
+                try:
+                    self.forensics_sink.on_detection(detection)
+                except Exception:                        # pragma: no cover
+                    _log.exception("forensics detection write failed")
             if self.graph is not None and touched:
                 self.graph.attribute_detection(touched, detection.score)
             incident = None
@@ -214,6 +246,11 @@ class DetectionPipeline:
                         incident = self.incident_aggregator.ingest(group, detection)
                     except Exception:                    # pragma: no cover
                         _log.exception("incident aggregator raised")
+            if incident is not None and self.forensics_sink is not None:
+                try:
+                    self.forensics_sink.on_incident(incident)
+                except Exception:                        # pragma: no cover
+                    _log.exception("forensics incident write failed")
             if self.response_engine is not None:
                 try:
                     self.response_engine.on_detection(detection)
@@ -221,6 +258,11 @@ class DetectionPipeline:
                         self.response_engine.on_incident(incident, new=previous_id is None)
                 except Exception:                        # pragma: no cover
                     _log.exception("response engine raised")
+            if incident is not None and self.case_manager is not None and previous_id is None:
+                try:
+                    self.case_manager.open_from_incident(incident)
+                except Exception:                        # pragma: no cover
+                    _log.exception("case manager raised")
             out.append(detection)
             if self.alert_sink is not None:
                 try:
