@@ -137,6 +137,8 @@ class ModelRegistry:
                     self._fire("retired", cur)
             mv.status = to
             mv.promoted_at = now_epoch()
+            if to == ModelStatus.RETIRED:
+                mv.retired_at = now_epoch()
             _log.info("promoted %s v%d → %s", model_id, version, to.value)
             self._fire("promoted", mv)
             return mv

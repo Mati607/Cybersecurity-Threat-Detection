@@ -627,6 +627,235 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
                     rules.extend(det.rules)
             return _json(200, build_compliance_report(framework, rules))
 
+        # model registry ----------------------------------------
+        def h_models_summary(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            reg = getattr(pipeline, "model_registry", None)
+            if reg is None:
+                return _json(200, {"enabled": False, "model_count": 0, "total_versions": 0, "models": {}})
+            return _json(200, reg.summary())
+
+        def h_models_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            reg = getattr(pipeline, "model_registry", None)
+            if reg is None:
+                return _json(200, {"enabled": False, "models": []})
+            models = reg.list_models()
+            result = []
+            for mid in models:
+                versions = reg.list_versions(mid)
+                result.append({
+                    "model_id": mid,
+                    "versions": [v.to_dict() for v in versions],
+                })
+            return _json(200, {"count": len(result), "models": result})
+
+        def h_models_get(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            reg = getattr(pipeline, "model_registry", None)
+            model_id = ctx["params"].get("model_id")
+            if not model_id:
+                raise _BadRequest("model_id required")
+            if reg is None:
+                return _json(200, {"enabled": False, "versions": []})
+            versions = reg.list_versions(model_id)
+            return _json(200, {"model_id": model_id, "versions": [v.to_dict() for v in versions]})
+
+        def h_models_promote(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            reg = getattr(pipeline, "model_registry", None)
+            if reg is None:
+                raise _BadRequest("model registry not configured")
+            body = ctx.get("body") or {}
+            model_id = body.get("model_id")
+            version = body.get("version")
+            status_str = body.get("status", "production")
+            if not model_id or version is None:
+                raise _BadRequest("model_id and version required")
+            from ..models.registry import ModelStatus
+            try:
+                to_status = ModelStatus(status_str)
+            except ValueError:
+                raise _BadRequest(f"unknown status: {status_str}")
+            mv = reg.promote(model_id, int(version), to=to_status)
+            if mv is None:
+                return _json(404, {"error": "version not found"})
+            return _json(200, mv.to_dict())
+
+        def h_models_register(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            reg = getattr(pipeline, "model_registry", None)
+            if reg is None:
+                raise _BadRequest("model registry not configured")
+            body = ctx.get("body") or {}
+            model_id = body.get("model_id")
+            detector_type = body.get("detector_type", "unknown")
+            if not model_id:
+                raise _BadRequest("model_id required")
+            mv = reg.register(
+                model_id,
+                detector_type,
+                train_samples=body.get("train_samples", 0),
+                hyperparams=body.get("hyperparams", {}),
+                tags=body.get("tags", []),
+                notes=body.get("notes", ""),
+            )
+            return _json(201, mv.to_dict())
+
+        def h_models_drift(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            trainers = getattr(pipeline, "_auto_trainers", {}) or {}
+            model_id = ctx["params"].get("model_id")
+            if model_id:
+                trainer = trainers.get(model_id)
+                if trainer is None:
+                    return _json(200, {"enabled": False, "model_id": model_id})
+                return _json(200, trainer.status())
+            result = {mid: t.status() for mid, t in trainers.items()}
+            return _json(200, {"count": len(result), "trainers": result})
+
+        def h_models_train_history(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            trainers = getattr(pipeline, "_auto_trainers", {}) or {}
+            model_id = ctx["params"].get("model_id")
+            if not model_id:
+                raise _BadRequest("model_id required")
+            trainer = trainers.get(model_id)
+            if trainer is None:
+                return _json(200, {"enabled": False, "model_id": model_id, "events": []})
+            return _json(200, {
+                "model_id": model_id,
+                "count": len(trainer.history()),
+                "events": [e.to_dict() for e in trainer.history()],
+            })
+
+        def h_models_trigger_train(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            trainers = getattr(pipeline, "_auto_trainers", {}) or {}
+            body = ctx.get("body") or {}
+            model_id = body.get("model_id")
+            if not model_id:
+                raise _BadRequest("model_id required")
+            trainer = trainers.get(model_id)
+            if trainer is None:
+                return _json(404, {"error": "trainer not found"})
+            from ..models.trainer import TrainReason
+            event = trainer.trigger(reason=TrainReason.MANUAL)
+            return _json(200, event.to_dict())
+
+        # reporting -------------------------------------------------
+        def _report_store(self):
+            return getattr(pipeline, "report_store", None)
+
+        def _report_builder(self):
+            return getattr(pipeline, "_report_builder", None)
+
+        def _report_scheduler(self):
+            return getattr(pipeline, "report_scheduler", None)
+
+        def h_reports_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = self._report_store()
+            if store is None:
+                return _json(200, {"enabled": False, "reports": []})
+            from ..reporting.model import ReportStatus, ReportType
+            rtype = ctx["params"].get("type")
+            rstatus = ctx["params"].get("status")
+            limit = min(int((ctx["params"].get("limit", "50") or "50") or 50), 200)
+            offset = int((ctx["params"].get("offset", "0") or "0") or 0)
+            reports = store.list_reports(
+                report_type=_enum_or_none(ReportType, rtype),
+                status=_enum_or_none(ReportStatus, rstatus),
+                limit=limit,
+                offset=offset,
+            )
+            return _json(200, {
+                "count": len(reports),
+                "total": store.count(),
+                "reports": [r.to_dict() for r in reports],
+            })
+
+        def h_reports_get(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = self._report_store()
+            report_id = ctx["params"].get("id")
+            if not report_id:
+                raise _BadRequest("id required")
+            if store is None:
+                return _json(404, {"error": "report store not configured"})
+            report = store.get(report_id)
+            if report is None:
+                return _json(404, {"error": "not found"})
+            include_rendered = ctx["params"].get("rendered", "false").lower() == "true"
+            return _json(200, report.to_dict(include_rendered=include_rendered))
+
+        def h_reports_generate(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            builder = self._report_builder()
+            store = self._report_store()
+            if builder is None:
+                raise _BadRequest("report builder not configured")
+            body = ctx.get("body") or {}
+            from ..reporting.model import ReportFormat, ReportType
+            rtype = ReportType(body.get("report_type", "executive"))
+            fmt = ReportFormat(body.get("format", "json"))
+            lookback = float(body.get("lookback_s", 86_400.0))
+            report = builder.build(
+                report_type=rtype,
+                format=fmt,
+                lookback_s=lookback,
+                title=body.get("title", ""),
+                tags=body.get("tags", []),
+            )
+            from ..reporting.renderer import render_report
+            report.rendered = render_report(report)
+            if store is not None:
+                store.save(report)
+            return _json(201, report.to_dict(include_rendered=(fmt.value != "json")))
+
+        def h_reports_stats(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            store = self._report_store()
+            if store is None:
+                return _json(200, {"enabled": False})
+            return _json(200, {"enabled": True, **store.stats()})
+
+        def h_schedules_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            scheduler = self._report_scheduler()
+            if scheduler is None:
+                return _json(200, {"enabled": False, "schedules": []})
+            schedules = scheduler.list_schedules()
+            return _json(200, {"count": len(schedules), "schedules": [s.to_dict() for s in schedules]})
+
+        def h_schedules_create(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            scheduler = self._report_scheduler()
+            if scheduler is None:
+                raise _BadRequest("report scheduler not configured")
+            body = ctx.get("body") or {}
+            from ..reporting.model import ReportFormat, ReportSchedule, ReportType
+            sch = ReportSchedule(
+                name=body.get("name", ""),
+                report_type=ReportType(body.get("report_type", "executive")),
+                format=ReportFormat(body.get("format", "json")),
+                interval_s=float(body.get("interval_s", 86_400.0)),
+                lookback_s=float(body.get("lookback_s", 86_400.0)),
+                tags=body.get("tags", []),
+            )
+            scheduler.add_schedule(sch)
+            return _json(201, sch.to_dict())
+
+        def h_schedules_delete(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            scheduler = self._report_scheduler()
+            if scheduler is None:
+                raise _BadRequest("report scheduler not configured")
+            body = ctx.get("body") or {}
+            schedule_id = body.get("schedule_id")
+            if not schedule_id:
+                raise _BadRequest("schedule_id required")
+            removed = scheduler.remove_schedule(schedule_id)
+            return _json(200, {"removed": removed})
+
+        def h_schedules_run(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            scheduler = self._report_scheduler()
+            if scheduler is None:
+                raise _BadRequest("report scheduler not configured")
+            body = ctx.get("body") or {}
+            schedule_id = body.get("schedule_id")
+            if not schedule_id:
+                raise _BadRequest("schedule_id required")
+            report = scheduler.run_now(schedule_id)
+            if report is None:
+                return _json(404, {"error": "schedule not found"})
+            return _json(200, report.to_dict())
+
         # dashboard ---------------------------------------------
         def h_dashboard(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
             from ..dashboard import render_dashboard
@@ -672,6 +901,24 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
         ("POST", "/cases/note"): _Handler.h_cases_note,
         ("GET", "/compliance/frameworks"): _Handler.h_compliance_frameworks,
         ("GET", "/compliance/report"): _Handler.h_compliance_report,
+        # model registry
+        ("GET", "/models"): _Handler.h_models_summary,
+        ("GET", "/models/list"): _Handler.h_models_list,
+        ("GET", "/models/get"): _Handler.h_models_get,
+        ("POST", "/models/register"): _Handler.h_models_register,
+        ("POST", "/models/promote"): _Handler.h_models_promote,
+        ("GET", "/models/drift"): _Handler.h_models_drift,
+        ("GET", "/models/train/history"): _Handler.h_models_train_history,
+        ("POST", "/models/train/trigger"): _Handler.h_models_trigger_train,
+        # reporting
+        ("GET", "/reports"): _Handler.h_reports_list,
+        ("GET", "/reports/get"): _Handler.h_reports_get,
+        ("POST", "/reports/generate"): _Handler.h_reports_generate,
+        ("GET", "/reports/stats"): _Handler.h_reports_stats,
+        ("GET", "/reports/schedules"): _Handler.h_schedules_list,
+        ("POST", "/reports/schedules"): _Handler.h_schedules_create,
+        ("POST", "/reports/schedules/delete"): _Handler.h_schedules_delete,
+        ("POST", "/reports/schedules/run"): _Handler.h_schedules_run,
         ("GET", "/"): _Handler.h_dashboard,
         ("GET", "/dashboard"): _Handler.h_dashboard,
     }
