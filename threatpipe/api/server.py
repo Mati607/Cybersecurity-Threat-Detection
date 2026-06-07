@@ -856,6 +856,98 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
                 return _json(404, {"error": "schedule not found"})
             return _json(200, report.to_dict())
 
+        # triage ------------------------------------------------
+        def h_triage_list(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            if engine is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            from ..triage import TriagePriority, TriageStatus
+            params = ctx["params"]
+            status = _enum_or_none(TriageStatus, params.get("status"))
+            min_priority = None
+            if params.get("min_priority"):
+                try:
+                    min_priority = TriagePriority(int(params["min_priority"]))
+                except (ValueError, KeyError):
+                    raise _BadRequest("min_priority must be 1..5")
+            alerts = engine.store.list(
+                status=status,
+                min_priority=min_priority,
+                min_severity=params.get("min_severity"),
+                host=params.get("host"),
+                active_only=params.get("active_only") == "true",
+                limit=int(params.get("limit", 100)),
+            )
+            return _json(200, {"enabled": True, "count": len(alerts),
+                                "items": [a.to_dict() for a in alerts]})
+
+        def h_triage_get(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            alert_id = ctx["params"].get("id")
+            if engine is None or not alert_id:
+                raise _BadRequest("triage alert id required")
+            alert = engine.store.get(alert_id)
+            if alert is None:
+                return _json(404, {"error": "alert not found"})
+            return _json(200, alert.to_dict())
+
+        def h_triage_stats(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            if engine is None:
+                return _json(200, {"enabled": False})
+            return _json(200, {"enabled": True, **engine.stats()})
+
+        def h_triage_update(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            body = ctx["body"] or {}
+            alert_id = body.get("id") or ctx["params"].get("id")
+            if engine is None or not alert_id:
+                raise _BadRequest("triage alert id required")
+            from ..triage import TriageDisposition, TriageStatus
+            status = _enum_or_none(TriageStatus, body.get("status"))
+            disposition = _enum_or_none(TriageDisposition, body.get("disposition"))
+            if status is None and disposition is None and not body.get("note"):
+                raise _BadRequest("status, disposition, or note required")
+            alert = engine.store.update(
+                alert_id, status=status, disposition=disposition, note=body.get("note"),
+            )
+            if alert is None:
+                return _json(404, {"error": "alert not found"})
+            return _json(200, alert.to_dict())
+
+        def h_triage_suppressions(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            if engine is None:
+                return _json(200, {"enabled": False, "count": 0, "items": []})
+            rules = engine.suppressions.list()
+            return _json(200, {"enabled": True, "count": len(rules),
+                                "stats": engine.suppressions.stats(),
+                                "items": [r.to_dict() for r in rules]})
+
+        def h_triage_suppress(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            if engine is None:
+                raise _BadRequest("triage layer disabled")
+            body = ctx["body"] or {}
+            if not body.get("rule_id") or not isinstance(body.get("match"), dict) or not body["match"]:
+                raise _BadRequest("rule_id and a non-empty match object are required")
+            from ..triage import SuppressionRule
+            try:
+                rule = SuppressionRule.from_dict({"created_by": "api", **body})
+            except (KeyError, ValueError) as exc:
+                raise _BadRequest(str(exc))
+            engine.suppressions.add(rule)
+            return _json(201, rule.to_dict())
+
+        def h_triage_unsuppress(self, ctx: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
+            engine = getattr(pipeline, "triage_engine", None)
+            body = ctx["body"] or {}
+            rule_id = body.get("rule_id") or ctx["params"].get("rule_id")
+            if engine is None or not rule_id:
+                raise _BadRequest("rule_id required")
+            removed = engine.suppressions.remove(rule_id)
+            return _json(200, {"removed": removed})
+
         # dashboard ---------------------------------------------
         def h_dashboard(self, _: Dict[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
             from ..dashboard import render_dashboard
@@ -919,6 +1011,14 @@ def _build_handler(pipeline: DetectionPipeline) -> type:
         ("POST", "/reports/schedules"): _Handler.h_schedules_create,
         ("POST", "/reports/schedules/delete"): _Handler.h_schedules_delete,
         ("POST", "/reports/schedules/run"): _Handler.h_schedules_run,
+        # triage
+        ("GET", "/triage"): _Handler.h_triage_list,
+        ("GET", "/triage/get"): _Handler.h_triage_get,
+        ("GET", "/triage/stats"): _Handler.h_triage_stats,
+        ("POST", "/triage/update"): _Handler.h_triage_update,
+        ("GET", "/triage/suppressions"): _Handler.h_triage_suppressions,
+        ("POST", "/triage/suppress"): _Handler.h_triage_suppress,
+        ("POST", "/triage/unsuppress"): _Handler.h_triage_unsuppress,
         ("GET", "/"): _Handler.h_dashboard,
         ("GET", "/dashboard"): _Handler.h_dashboard,
     }

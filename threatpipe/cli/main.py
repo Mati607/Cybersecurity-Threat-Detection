@@ -159,6 +159,54 @@ def _read_jsonl(path: str | Path):
                 yield event
 
 
+# --- subsystem wiring ---------------------------------------------
+
+def _attach_triage(pipeline, cfg) -> None:
+    """Build and attach a triage engine when ``triage.enabled`` is set.
+
+    The engine forwards newly-actionable/escalated alerts to the existing
+    alert sink, so deduplicated, prioritized alerts (not the raw detection
+    firehose) reach the configured channels.
+    """
+    if not cfg.triage.enabled:
+        return
+    from ..triage import PriorityScorer, SuppressionList, TriageEngine, TriagePriority, TriageStore
+
+    suppressions = SuppressionList()
+    if cfg.triage.suppression_path:
+        try:
+            loaded = suppressions.load_json(cfg.triage.suppression_path)
+            _log.info("loaded %d suppression rule(s) from %s", loaded, cfg.triage.suppression_path)
+        except (OSError, ValueError) as exc:
+            _log.warning("could not load suppression rules: %s", exc)
+
+    try:
+        escalate_at = TriagePriority(cfg.triage.escalate_at)
+    except ValueError:
+        escalate_at = TriagePriority.P2
+
+    def downstream(alert):
+        # Alerts are the analyst-facing, deduplicated unit; emit a compact
+        # summary when one becomes actionable or escalates. Channels that
+        # want richer payloads can consume the /triage API instead.
+        _log.warning(
+            "TRIAGE %s [%s] %s count=%d hosts=%d score=%.2f",
+            alert.alert_id, alert.priority.label, alert.title,
+            alert.count, alert.distinct_hosts, alert.priority_score,
+        )
+
+    pipeline.triage_engine = TriageEngine(
+        store=TriageStore(max_size=cfg.triage.max_alerts),
+        suppressions=suppressions,
+        scorer=PriorityScorer(),
+        downstream=downstream,
+        dedup_window_s=cfg.triage.dedup_window_s,
+        escalate_at=escalate_at,
+    )
+    _log.info("triage engine attached (dedup_window=%.0fs, escalate_at=%s)",
+              cfg.triage.dedup_window_s, escalate_at.name)
+
+
 # --- command handlers ---------------------------------------------
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -166,6 +214,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     configure_logging(level=cfg.log_level, log_file=cfg.log_file)
 
     pipeline = DetectionPipeline(cfg, alert_sink=build_alert_sink(cfg.alerts))
+    _attach_triage(pipeline, cfg)
 
     if args.warmup:
         _log.info("warming up detectors from %s", args.warmup)

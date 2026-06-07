@@ -61,6 +61,15 @@ class AlertConfig:
 
 
 @dataclass
+class TriageConfig:
+    enabled: bool = False
+    dedup_window_s: float = 3600.0
+    escalate_at: int = 2  # forward to downstream on reaching this priority (P1..P5)
+    max_alerts: int = 10_000
+    suppression_path: Optional[str] = None  # JSON file of suppression rules to preload
+
+
+@dataclass
 class ApiConfig:
     host: str = "127.0.0.1"
     port: int = 8088
@@ -73,6 +82,7 @@ class PipelineConfig:
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    triage: TriageConfig = field(default_factory=TriageConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     log_level: str = "INFO"
     log_file: Optional[str] = None
@@ -126,6 +136,7 @@ def load_config(path: Optional[str | os.PathLike[str]] = None) -> PipelineConfig
         "INGESTION": cfg.ingestion,
         "DETECTION": cfg.detection,
         "ALERTS": cfg.alerts,
+        "TRIAGE": cfg.triage,
         "API": cfg.api,
     }
     for env_key, env_value in os.environ.items():

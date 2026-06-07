@@ -101,6 +101,13 @@ this way.
 | POST   | `/cases/note`            | Append a note to a case                              |
 | GET    | `/compliance/frameworks` | List bundled control frameworks                      |
 | GET    | `/compliance/report`     | Control-coverage + gap report (`?framework=`)        |
+| GET    | `/triage`                | List triaged alerts (`?status=&min_priority=&host=`) |
+| GET    | `/triage/get`            | Fetch a single triaged alert (`?id=`)                |
+| GET    | `/triage/stats`          | Dedup ratio, priority/severity/status breakdown      |
+| POST   | `/triage/update`         | Set status / disposition / note on an alert          |
+| GET    | `/triage/suppressions`   | List active suppression rules                        |
+| POST   | `/triage/suppress`       | Add a suppression rule (`rule_id`, `match`, ...)     |
+| POST   | `/triage/unsuppress`     | Remove a suppression rule (`rule_id`)                |
 | GET    | `/` and `/dashboard`     | Single-file HTML SOC console                         |
 
 Pass `X-Api-Key` (or `Authorization: Bearer <key>`) when an api key is
@@ -155,6 +162,38 @@ up to date. `infer_phase` maps MITRE technique tags and free-form
 labels ("persistence", "c2", "ransomware", ...) onto Lockheed-Martin
 phases; `build_timeline` produces an audit-trail view with
 escalation markers for analyst hand-off.
+
+## Alert triage
+
+The detection ensemble emits one detection per interesting event, which
+in a busy environment is more than an analyst can read. The `triage`
+layer turns that firehose into a ranked, deduplicated work queue:
+
+* **Deduplication** — detections collapse into a single `TriagedAlert`
+  keyed by a fingerprint of `detector` + the salient entity (process,
+  destination, file, ...). `host` is intentionally *not* part of the
+  fingerprint, so the same signature seen across the fleet becomes one
+  alert that tracks the set of affected hosts.
+* **Suppression** — `SuppressionRule`s silence known-benign noise by
+  matching event/detector/tag fields (with `value*` prefix wildcards).
+  Each rule carries a `max_severity` ceiling so a broad rule can never
+  swallow a genuinely critical detection, plus an optional `expires_at`
+  for maintenance windows.
+* **Priority scoring** — `PriorityScorer` folds severity *and* volume,
+  host spread, threat-intel context, and detector confidence into a
+  single 0..1 score, bucketed into `P1`..`P5`. A medium-severity
+  detector firing across forty hosts out-prioritizes a one-off critical.
+
+Wire `TriageEngine` in as the pipeline's alert sink (it is a
+`Detection -> None` callable) and give it a `downstream` sink; only
+newly-actionable or freshly-escalated alerts are forwarded onward, so
+Slack/PagerDuty see signal rather than the raw detection stream. Enable
+it from config:
+
+```json
+{ "triage": { "enabled": true, "dedup_window_s": 3600,
+              "escalate_at": 2, "suppression_path": "suppressions.json" } }
+```
 
 ## Testing
 

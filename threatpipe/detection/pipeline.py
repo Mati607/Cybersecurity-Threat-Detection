@@ -108,6 +108,7 @@ class DetectionPipeline:
         self.response_engine: Optional[Any] = None
         self.forensics_sink: Optional[Any] = None
         self.case_manager: Optional[Any] = None
+        self.triage_engine: Optional[Any] = None
         self.metrics = PipelineMetrics()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -157,6 +158,7 @@ class DetectionPipeline:
         if detection is None:
             return
         self.metrics.record(detection)
+        self._run_triage(detection)
         if self.forensics_sink is not None:
             try:
                 self.forensics_sink.on_detection(detection)
@@ -223,6 +225,7 @@ class DetectionPipeline:
             if detection is None:
                 continue
             self.metrics.record(detection)
+            self._run_triage(detection)
             if self.forensics_sink is not None:
                 try:
                     self.forensics_sink.on_detection(detection)
@@ -274,6 +277,15 @@ class DetectionPipeline:
             if len(self._recent) > self._recent_limit:
                 del self._recent[: len(self._recent) - self._recent_limit]
         return out
+
+    def _run_triage(self, detection: Detection) -> None:
+        """Feed a detection through the triage engine, if one is attached."""
+        if self.triage_engine is None:
+            return
+        try:
+            self.triage_engine.ingest(detection)
+        except Exception:                                # pragma: no cover
+            _log.exception("triage engine raised")
 
     def recent(self, limit: int = 100) -> List[Detection]:
         with self._lock:
